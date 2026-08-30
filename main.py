@@ -31,18 +31,25 @@ def keep_alive():
 BOT_TOKEN = "8986502114:AAFVjiRDeJYSJNRc2Hd7rBiCtjgG1-_sNDs"
 API_KEY = "sk_aNOsM1BKzhp7H1q4"
 DOMAIN = "gemini18monthgift.s.gy"
-FREE_DAILY_LIMIT = 5
-PRICE_STARS = 30  # ~0.60 USD в Telegram Stars
+FREE_DAILY_LIMIT = 10
+ADMIN_ID = 123456789  # Вставьте ваш ID Telegram для подтверждений/ручных оплат
+
+# Реквизиты для оплаты (замените на свои)
+CRYPTOBOT_PAY_URL = "https://t.me/CryptoBot?start=pay"  # Или конкретный чек/инвойс из @CryptoBot
+XROCKET_PAY_URL = "https://t.me/xrocket?start=pay"     # Или инвойс из @xrocket
+SBP_DETAILS = "+7 (999) 000-00-00 (Тинькофф / Сбер)"
+CRYPTO_WALLETS = "• USDT (TRC-20): `TXXXXXXXXXXXXXXXXXXXXXXXXXXXXX`\n• TON: `UQXXXXXXXXXXXXXXXXXXXXXXXXXXXXX`"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# --- ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ---
+# --- БАЗА ДАННЫХ ---
 db = sqlite3.connect("database.db", check_same_thread=False)
 cursor = db.cursor()
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
+    lang TEXT DEFAULT 'ru',
     is_vip INTEGER DEFAULT 0,
     daily_used INTEGER DEFAULT 0,
     last_reset_date TEXT
@@ -60,22 +67,66 @@ CREATE TABLE IF NOT EXISTS links_history (
 """)
 db.commit()
 
-# --- СИСТЕМА ЛИМИТОВ И VIP ---
+# --- ТЕКСТЫ И ЛОКАЛИЗАЦИЯ (RU / EN) ---
+TEXTS = {
+    'ru': {
+        'start': "👋 **Добро пожаловать в Shortener Bot!**\n\n📊 Статус: {status}\n\n**Команды:**\n• Отправьте ссылку, список или `.txt` файл\n• `/custom <ссылка> <хвост>` — создать именную ссылку\n• `/stats <короткая_ссылка>` — статистика кликов\n• `/history` — история ваших ссылок\n• `/language` — сменить язык\n• `/buy` — купить вечный безлимит за ~0.60$",
+        'vip_status': "👑 Безлимит навсегда",
+        'free_status': "Лимит: {used}/{limit} ссылок сегодня",
+        'select_lang': "🌐 Пожалуйста, выберите язык / Please select your language:",
+        'limit_reached': "❌ Превышен лимит ({used}/{limit} сегодня).\nКупите безлимит навсегда за 0.60$: `/buy`",
+        'choose_pay': "💳 **Покупка вечного безлимита (~$0.60 / 60₽)**\n\nВыберите удобный способ оплаты:",
+        'pay_stars': "⭐ Telegram Stars (30 Stars)",
+        'pay_crypto': "🤖 CryptoBot (USDT / TON)",
+        'pay_xrocket': "🚀 xRocket",
+        'pay_sbp': "🇷🇺 СБП / Банковская карта",
+        'pay_direct_crypto': "💎 Прямой перевод Crypto (USDT/TON)",
+        'sbp_info': f"💳 **Оплата через СБП / Карту (60 руб)**\n\nРеквизиты для перевода:\n`{SBP_DETAILS}`\n\nПосле оплаты отправьте скриншот/чек администратору для выдачи доступа.",
+        'direct_crypto_info': f"💎 **Оплата криптовалютой ($0.60)**\n\n{CRYPTO_WALLETS}\n\nПосле отправки напишите админу с TXID транзакции.",
+        'ready_one': "✅ Готово:",
+        'bulk_start': "🚀 Быстрая обработка...",
+        'bulk_done': "✅ Готово! Обработано {count} ссылок."
+    },
+    'en': {
+        'start': "👋 **Welcome to Shortener Bot!**\n\n📊 Status: {status}\n\n**Commands:**\n• Send link(s) or `.txt` file\n• `/custom <link> <slug>` — create branded link\n• `/stats <short_link>` — view click stats\n• `/history` — recent links\n• `/language` — change language\n• `/buy` — lifetime unlimited for ~$0.60",
+        'vip_status': "👑 Lifetime Unlimited",
+        'free_status': "Limit: {used}/{limit} links today",
+        'select_lang': "🌐 Please select your language / Пожалуйста, выберите язык:",
+        'limit_reached': "❌ Daily limit exceeded ({used}/{limit} today).\nUnlock lifetime access for $0.60: `/buy`",
+        'choose_pay': "💳 **Lifetime Unlimited Access (~$0.60)**\n\nSelect a payment method:",
+        'pay_stars': "⭐ Telegram Stars (30 Stars)",
+        'pay_crypto': "🤖 CryptoBot (USDT / TON)",
+        'pay_xrocket': "🚀 xRocket",
+        'pay_sbp': "🇷🇺 Card / SBP (RUB)",
+        'pay_direct_crypto': "💎 Direct Crypto (USDT/TON)",
+        'sbp_info': f"💳 **Payment via Card / SBP (60 RUB)**\n\nDetails:\n`{SBP_DETAILS}`\n\nAfter payment, send receipt to admin for activation.",
+        'direct_crypto_info': f"💎 **Direct Crypto ($0.60)**\n\n{CRYPTO_WALLETS}\n\nAfter transaction, contact admin with TXID.",
+        'ready_one': "✅ Ready:",
+        'bulk_start': "🚀 Fast processing...",
+        'bulk_done': "✅ Done! Processed {count} links."
+    }
+}
+
+# --- ФУНКЦИИ ПОЛЬЗОВАТЕЛЕЙ ---
 def get_user(user_id):
     today = time.strftime("%Y-%m-%d")
-    cursor.execute("SELECT is_vip, daily_used, last_reset_date FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT lang, is_vip, daily_used, last_reset_date FROM users WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     if not row:
-        cursor.execute("INSERT INTO users (user_id, is_vip, daily_used, last_reset_date) VALUES (?, 0, 0, ?)", (user_id, today))
+        cursor.execute("INSERT INTO users (user_id, lang, is_vip, daily_used, last_reset_date) VALUES (?, 'ru', 0, 0, ?)", (user_id, today))
         db.commit()
-        return {"is_vip": 0, "daily_used": 0}
+        return {"lang": "ru", "is_vip": 0, "daily_used": 0, "new": True}
     
-    is_vip, daily_used, last_date = row
+    lang, is_vip, daily_used, last_date = row
     if last_date != today:
         cursor.execute("UPDATE users SET daily_used = 0, last_reset_date = ? WHERE user_id = ?", (today, user_id))
         db.commit()
         daily_used = 0
-    return {"is_vip": is_vip, "daily_used": daily_used}
+    return {"lang": lang, "is_vip": is_vip, "daily_used": daily_used, "new": False}
+
+def set_user_lang(user_id, lang):
+    cursor.execute("UPDATE users SET lang = ? WHERE user_id = ?", (lang, user_id))
+    db.commit()
 
 def add_usage(user_id, count):
     cursor.execute("UPDATE users SET daily_used = daily_used + ? WHERE user_id = ?", (count, user_id))
@@ -100,9 +151,9 @@ def shorten_api(url, custom_slug=None):
         r = requests.post("https://api.short.io/links", json=payload, headers=headers, timeout=10)
         if r.status_code in [200, 201]:
             return r.json().get("shortURL")
-        return f"Ошибка: {r.json().get('message', 'Не удалось')}"
+        return f"Error: {r.json().get('message', 'Failed')}"
     except Exception as e:
-        return f"Сетевая ошибка"
+        return "Network Error"
 
 def generate_qr(url_text):
     qr = qrcode.QRCode(box_size=10, border=2)
@@ -115,42 +166,86 @@ def generate_qr(url_text):
     bio.seek(0)
     return bio
 
-# --- КОМАНДЫ БОТА ---
-@bot.message_handler(commands=['start', 'help'])
+# --- ОБРАБОТЧИКИ КОМАНД ---
+@bot.message_handler(commands=['start'])
 def cmd_start(message):
     u = get_user(message.from_user.id)
-    vip_status = "👑 Безлимит навсегда" if u["is_vip"] else f"Лимит: {u['daily_used']}/{FREE_DAILY_LIMIT} сегодня"
-    text = (
-        f"👋 **Универсальный сокращатель ссылок**\n\n"
-        f"📊 **Ваш статус:** {vip_status}\n\n"
-        f"**Доступные команды:**\n"
-        f"• Просто отправьте ссылки или `.txt` файл для сокращения\n"
-        f"• `/custom <ссылка> <хвост>` — создать именную ссылку\n"
-        f"• `/stats <короткая_ссылка>` — статистика переходов\n"
-        f"• `/history` — список ваших последних ссылок\n"
-        f"• `/buy` — купить вечный безлимит за ~0.60$ (30 ⭐)"
-    )
-    bot.reply_to(message, text, parse_mode="Markdown")
+    if u.get("new"):
+        # Если новый пользователь — сначала выбор языка
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("🇷🇺 Русский", callback_data="setlang_ru"),
+               types.InlineKeyboardButton("🇬🇧 English", callback_data="setlang_en"))
+        bot.send_message(message.chat.id, TEXTS['ru']['select_lang'], reply_markup=kb)
+        return
 
-# Покупка вечного доступа
+    show_main_menu(message.chat.id, u)
+
+@bot.message_handler(commands=['language'])
+def cmd_language(message):
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🇷🇺 Русский", callback_data="setlang_ru"),
+           types.InlineKeyboardButton("🇬🇧 English", callback_data="setlang_en"))
+    bot.send_message(message.chat.id, "🌐 Выберите язык / Select language:", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("setlang_"))
+def callback_set_lang(call):
+    lang = call.data.split("_")[1]
+    set_user_lang(call.from_user.id, lang)
+    bot.answer_callback_query(call.id, "Язык сохранен / Language saved!")
+    u = get_user(call.from_user.id)
+    show_main_menu(call.message.chat.id, u)
+
+def show_main_menu(chat_id, user_dict):
+    l = user_dict["lang"]
+    t = TEXTS[l]
+    status = t['vip_status'] if user_dict['is_vip'] else t['free_status'].format(used=user_dict['daily_used'], limit=FREE_DAILY_LIMIT)
+    bot.send_message(chat_id, t['start'].format(status=status), parse_mode="Markdown")
+
+# --- МЕНЮ ОПЛАТЫ (/buy) ---
 @bot.message_handler(commands=['buy'])
 def cmd_buy(message):
     u = get_user(message.from_user.id)
+    l = u["lang"]
+    t = TEXTS[l]
+
     if u["is_vip"]:
-        bot.reply_to(message, "👑 У вас уже активирован вечный безлимитный доступ!")
+        bot.reply_to(message, t['vip_status'])
         return
 
-    prices = [types.LabeledPrice(label="Вечный безлимит", amount=PRICE_STARS)]
-    bot.send_invoice(
-        chat_id=message.chat.id,
-        title="👑 VIP-доступ Навсегда",
-        description="Безлимитное сокращение любых объемов ссылок, статистика и кастомные ссылки без ограничений.",
-        invoice_payload="buy_lifetime_vip",
-        provider_token="",
-        currency="XTR",
-        prices=prices,
-        start_parameter="buy_vip"
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        types.InlineKeyboardButton(t['pay_stars'], callback_data="pay_stars"),
+        types.InlineKeyboardButton(t['pay_crypto'], url=CRYPTOBOT_PAY_URL),
+        types.InlineKeyboardButton(t['pay_xrocket'], url=XROCKET_PAY_URL),
+        types.InlineKeyboardButton(t['pay_sbp'], callback_data="pay_sbp"),
+        types.InlineKeyboardButton(t['pay_direct_crypto'], callback_data="pay_direct_crypto")
     )
+    bot.send_message(message.chat.id, t['choose_pay'], parse_mode="Markdown", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("pay_"))
+def callback_payment(call):
+    u = get_user(call.from_user.id)
+    l = u["lang"]
+    t = TEXTS[l]
+
+    if call.data == "pay_stars":
+        prices = [types.LabeledPrice(label="Lifetime VIP", amount=30)]
+        bot.send_invoice(
+            chat_id=call.message.chat.id,
+            title="VIP Access",
+            description="Lifetime unlimited link shortening & custom slugs.",
+            invoice_payload="buy_lifetime_vip",
+            provider_token="",
+            currency="XTR",
+            prices=prices,
+            start_parameter="buy_vip"
+        )
+    elif call.data == "pay_sbp":
+        bot.send_message(call.message.chat.id, t['sbp_info'], parse_mode="Markdown")
+    elif call.data == "pay_direct_crypto":
+        bot.send_message(call.message.chat.id, t['direct_crypto_info'], parse_mode="Markdown")
+    
+    bot.answer_callback_query(call.id)
 
 @bot.pre_checkout_query_handler(func=lambda query: True)
 def process_pre_checkout(pre_checkout_query):
@@ -160,77 +255,85 @@ def process_pre_checkout(pre_checkout_query):
 def process_payment(message):
     cursor.execute("UPDATE users SET is_vip = 1 WHERE user_id = ?", (message.from_user.id,))
     db.commit()
-    bot.send_message(message.chat.id, "🎉 **Оплата принята!**\nВам открыт постоянный безлимитный доступ ко всем функциям.", parse_mode="Markdown")
+    bot.send_message(message.chat.id, "🎉 **VIP Activated!**", parse_mode="Markdown")
 
-# Создание кастомной ссылки
+# Выдача VIP администратором вручную (для СБП / Crypto)
+@bot.message_handler(commands=['givevip'])
+def cmd_give_vip(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    try:
+        target_id = int(message.text.split()[1])
+        cursor.execute("UPDATE users SET is_vip = 1 WHERE user_id = ?", (target_id,))
+        db.commit()
+        bot.reply_to(message, f"✅ VIP успешно выдан пользователю `{target_id}`!")
+        bot.send_message(target_id, "👑 Администратор активировал вам вечный VIP-доступ!")
+    except:
+        bot.reply_to(message, "Используйте: `/givevip USER_ID`", parse_mode="Markdown")
+
+# --- КАСТОМНЫЕ ССЫЛКИ, СТАТИСТИКА, ИСТОРИЯ ---
 @bot.message_handler(commands=['custom'])
 def cmd_custom(message):
     u = get_user(message.from_user.id)
+    l = u["lang"]
+    t = TEXTS[l]
+
     if not u["is_vip"] and u["daily_used"] >= FREE_DAILY_LIMIT:
-        bot.reply_to(message, "❌ Вы исчерпали дневной бесплатный лимит. Разблокируйте безлимит: `/buy`", parse_mode="Markdown")
+        bot.reply_to(message, t['limit_reached'].format(used=u['daily_used'], limit=FREE_DAILY_LIMIT), parse_mode="Markdown")
         return
 
     parts = message.text.split()
     if len(parts) < 3:
-        bot.reply_to(message, "Используйте формат:\n`/custom https://example.com/long мой-хвост`", parse_mode="Markdown")
+        bot.reply_to(message, "Формат / Format:\n`/custom https://example.com my-slug`", parse_mode="Markdown")
         return
 
-    url, slug = parts[1], parts[2]
-    res = shorten_api(url, custom_slug=slug)
+    res = shorten_api(parts[1], custom_slug=parts[2])
     if res.startswith("http"):
         add_usage(message.from_user.id, 1)
-        save_link_history(message.from_user.id, url, res)
+        save_link_history(message.from_user.id, parts[1], res)
         qr = generate_qr(res)
-        bot.send_photo(message.chat.id, qr, caption=f"✅ Готово: {res}")
+        bot.send_photo(message.chat.id, qr, caption=f"{t['ready_one']} {res}")
     else:
         bot.reply_to(message, f"❌ {res}")
 
-# Статистика кликов
 @bot.message_handler(commands=['stats'])
 def cmd_stats(message):
     parts = message.text.split()
     if len(parts) < 2:
-        bot.reply_to(message, "Используйте формат: `/stats https://gemini18monthgift.s.gy/xxxx`", parse_mode="Markdown")
+        bot.reply_to(message, "Формат: `/stats https://gemini18monthgift.s.gy/xxxx`", parse_mode="Markdown")
         return
-
-    short_url = parts[1].strip()
-    path = short_url.split("/")[-1]
-    
+    path = parts[1].strip().split("/")[-1]
     try:
-        # Получаем Link ID
         info_resp = requests.get(f"https://api.short.io/links/expand?domain={DOMAIN}&path={path}", headers=headers).json()
         link_id = info_resp.get("idString")
         if not link_id:
-            bot.reply_to(message, "❌ Ссылка не найдена в базе домена.")
+            bot.reply_to(message, "❌ Link not found.")
             return
-
-        # Запрашиваем статистику
         stat_resp = requests.get(f"https://api.short.io/statistics/link/{link_id}?period=total", headers=headers).json()
-        total_clicks = stat_resp.get("humanClicks", 0)
-        bot.reply_to(message, f"📊 **Статистика для {short_url}:**\n\n👆 Всего переходов (кликов): **{total_clicks}**", parse_mode="Markdown")
+        clicks = stat_resp.get("humanClicks", 0)
+        bot.reply_to(message, f"📊 Clicks / Переходов: **{clicks}**", parse_mode="Markdown")
     except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка получения статистики: {e}")
+        bot.reply_to(message, f"❌ Error: {e}")
 
-# История ссылок
 @bot.message_handler(commands=['history'])
 def cmd_history(message):
     cursor.execute("SELECT original_url, short_url FROM links_history WHERE user_id = ? ORDER BY id DESC LIMIT 5", (message.from_user.id,))
     rows = cursor.fetchall()
     if not rows:
-        bot.reply_to(message, "У вас пока нет сохраненной истории.")
+        bot.reply_to(message, "История пуста / History is empty.")
         return
-    text = "📜 **Последние сокращенные ссылки:**\n\n" + "\n\n".join([f"• {orig[:30]}... → {short}" for orig, short in rows])
+    text = "📜 **Recent Links / История:**\n\n" + "\n\n".join([f"• {orig[:30]}... → {short}" for orig, short in rows])
     bot.reply_to(message, text, parse_mode="Markdown")
 
-# --- МНОГОПОТОЧНАЯ ПАКЕТНАЯ ОБРАБОТКА (БЫСТРО + ПРОГРЕСС-БАР) ---
+# --- БЫСТРАЯ ОБРАБОТКА ПОТОКАМИ ---
 def process_bulk_fast(user_id, raw_urls, message_id, chat_id):
     total = len(raw_urls)
     results = [None] * total
     completed = 0
     last_edit = time.time()
 
-    def worker(idx_url):
-        idx, url = idx_url
+    def worker(item):
+        idx, url = item
         res = shorten_api(url)
         if res.startswith("http"):
             save_link_history(user_id, url, res)
@@ -242,29 +345,22 @@ def process_bulk_fast(user_id, raw_urls, message_id, chat_id):
             idx, res = f.result()
             results[idx] = res
             completed += 1
-
-            # Обновление прогресс-бара каждые 1.5 сек (защита от Telegram Rate Limits)
             if time.time() - last_edit > 1.5 or completed == total:
                 percent = int((completed / total) * 100)
                 filled = int((completed / total) * 10)
                 bar = "█" * filled + "░" * (10 - filled)
                 try:
-                    bot.edit_message_text(
-                        f"⚡ **Обработка ссылок:**\n`[{bar}]` {percent}%\nУспешно: {completed}/{total}",
-                        chat_id=chat_id,
-                        message_id=message_id,
-                        parse_mode="Markdown"
-                    )
+                    bot.edit_message_text(f"⚡ `[{bar}]` {percent}%\n({completed}/{total})", chat_id=chat_id, message_id=message_id, parse_mode="Markdown")
                 except:
                     pass
                 last_edit = time.time()
-
     return results
 
 # --- ОБРАБОТКА ФАЙЛОВ И ТЕКСТА ---
 @bot.message_handler(content_types=['document'])
 def handle_doc(message):
     u = get_user(message.from_user.id)
+    t = TEXTS[u["lang"]]
     try:
         file_info = bot.get_file(message.document.file_id)
         downloaded = bot.download_file(file_info.file_path)
@@ -272,50 +368,50 @@ def handle_doc(message):
         urls = re.findall(r'(https?://[^\s\]\)]+)', content)
 
         if not urls:
-            bot.reply_to(message, "❌ Ссылок в файле не найдено.")
+            bot.reply_to(message, "❌ No links found.")
             return
 
         if not u["is_vip"] and (u["daily_used"] + len(urls)) > FREE_DAILY_LIMIT:
-            bot.reply_to(message, f"❌ Превышен лимит. В файле {len(urls)} ссылок, а доступно {FREE_DAILY_LIMIT - u['daily_used']}.\nКупите безлимит навсегда за 30 ⭐: `/buy`", parse_mode="Markdown")
+            bot.reply_to(message, t['limit_reached'].format(used=u['daily_used'], limit=FREE_DAILY_LIMIT), parse_mode="Markdown")
             return
 
-        status_msg = bot.reply_to(message, "🚀 Запуск быстрой обработки...")
+        status_msg = bot.reply_to(message, t['bulk_start'])
         res = process_bulk_fast(message.from_user.id, urls, status_msg.message_id, message.chat.id)
         add_usage(message.from_user.id, len(urls))
 
         out = io.BytesIO("\n".join(res).encode('utf-8'))
         out.name = "shortened_urls.txt"
-        bot.send_document(message.chat.id, out, caption=f"✅ Обработано {len(urls)} ссылок.")
+        bot.send_document(message.chat.id, out, caption=t['bulk_done'].format(count=len(urls)))
         bot.delete_message(message.chat.id, status_msg.message_id)
     except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
+        bot.reply_to(message, f"❌ Error: {e}")
 
 @bot.message_handler(func=lambda message: True)
 def handle_msg(message):
     urls = re.findall(r'(https?://[^\s\]\)]+)', message.text)
     if not urls:
-        bot.reply_to(message, "❌ Отправьте ссылку, список или файл.")
+        bot.reply_to(message, "❌ Отправьте ссылку или файл / Send link or file.")
         return
 
     u = get_user(message.from_user.id)
+    t = TEXTS[u["lang"]]
+
     if not u["is_vip"] and (u["daily_used"] + len(urls)) > FREE_DAILY_LIMIT:
-        bot.reply_to(message, f"❌ Превышен дневной лимит ({u['daily_used']}/{FREE_DAILY_LIMIT}).\nРазблокируйте вечный безлимит: `/buy`", parse_mode="Markdown")
+        bot.reply_to(message, t['limit_reached'].format(used=u['daily_used'], limit=FREE_DAILY_LIMIT), parse_mode="Markdown")
         return
 
-    # Если одна ссылка — выдаем сразу ссылку + QR-код
     if len(urls) == 1:
         res = shorten_api(urls[0])
         if res.startswith("http"):
             add_usage(message.from_user.id, 1)
             save_link_history(message.from_user.id, urls[0], res)
             qr = generate_qr(res)
-            bot.send_photo(message.chat.id, qr, caption=f"🔗 {res}")
+            bot.send_photo(message.chat.id, qr, caption=f"{t['ready_one']} {res}")
         else:
             bot.reply_to(message, res)
         return
 
-    # Если пачка ссылок — запускаем многопоточную обработку
-    status_msg = bot.reply_to(message, "🚀 Запуск быстрой обработки...")
+    status_msg = bot.reply_to(message, t['bulk_start'])
     res = process_bulk_fast(message.from_user.id, urls, status_msg.message_id, message.chat.id)
     add_usage(message.from_user.id, len(urls))
 
@@ -323,7 +419,7 @@ def handle_msg(message):
     if len(result_text) > 4000:
         out = io.BytesIO(result_text.encode('utf-8'))
         out.name = "shortened_urls.txt"
-        bot.send_document(message.chat.id, out, caption="✅ Ваши ссылки готовы!")
+        bot.send_document(message.chat.id, out, caption=t['bulk_done'].format(count=len(urls)))
     else:
         bot.send_message(message.chat.id, result_text)
     
@@ -334,5 +430,5 @@ def handle_msg(message):
 
 if __name__ == "__main__":
     keep_alive()
-    print("✅ Бот со всеми модулями запущен!")
+    print("✅ Бот обновлен и запущен!")
     bot.infinity_polling()
