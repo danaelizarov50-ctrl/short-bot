@@ -32,11 +32,11 @@ BOT_TOKEN = "8986502114:AAFVjiRDeJYSJNRc2Hd7rBiCtjgG1-_sNDs"
 API_KEY = "sk_aNOsM1BKzhp7H1q4"
 DOMAIN = "gemini18monthgift.s.gy"
 FREE_DAILY_LIMIT = 10
-ADMIN_ID = 6598036118  # Вставьте ваш ID Telegram для подтверждений/ручных оплат
+ADMIN_ID = 6598036118  # Ваш Telegram ID для авто-VIP и ручных подтверждений
 
-# Реквизиты для оплаты (замените на свои)
-CRYPTOBOT_PAY_URL = "https://t.me/CryptoBot?start=pay"  # Или конкретный чек/инвойс из @CryptoBot
-XROCKET_PAY_URL = "https://t.me/xrocket?start=pay"     # Или инвойс из @xrocket
+# Реквизиты для оплаты
+CRYPTOBOT_PAY_URL = "https://t.me/CryptoBot?start=pay"
+XROCKET_PAY_URL = "https://t.me/xrocket?start=pay"
 SBP_DETAILS = "+7 (999) 000-00-00 (Тинькофф / Сбер)"
 CRYPTO_WALLETS = "• USDT (TRC-20): `TXXXXXXXXXXXXXXXXXXXXXXXXXXXXX`\n• TON: `UQXXXXXXXXXXXXXXXXXXXXXXXXXXXXX`"
 
@@ -107,9 +107,8 @@ TEXTS = {
     }
 }
 
-# --- ФУНКЦИИ ПОЛЬЗОВАТЕЛЕЙ ---
+# --- ПОЛЬЗОВАТЕЛИ ---
 def get_user(user_id):
-    # Автоматический вечный VIP для вас
     if user_id == ADMIN_ID:
         return {"lang": "ru", "is_vip": 1, "daily_used": 0, "new": False}
 
@@ -120,7 +119,7 @@ def get_user(user_id):
         cursor.execute("INSERT INTO users (user_id, lang, is_vip, daily_used, last_reset_date) VALUES (?, 'ru', 0, 0, ?)", (user_id, today))
         db.commit()
         return {"lang": "ru", "is_vip": 0, "daily_used": 0, "new": True}
-
+    
     lang, is_vip, daily_used, last_date = row
     if last_date != today:
         cursor.execute("UPDATE users SET daily_used = 0, last_reset_date = ? WHERE user_id = ?", (today, user_id))
@@ -128,23 +127,36 @@ def get_user(user_id):
         daily_used = 0
     return {"lang": lang, "is_vip": is_vip, "daily_used": daily_used, "new": False}
 
-# --- SHORT.IO API ---
-headers = {
+def set_user_lang(user_id, lang):
+    cursor.execute("UPDATE users SET lang = ? WHERE user_id = ?", (lang, user_id))
+    db.commit()
+
+def add_usage(user_id, count):
+    cursor.execute("UPDATE users SET daily_used = daily_used + ? WHERE user_id = ?", (count, user_id))
+    db.commit()
+
+def save_link_history(user_id, original, short):
+    cursor.execute("INSERT INTO links_history (user_id, original_url, short_url) VALUES (?, ?, ?)", (user_id, original, short))
+    db.commit()
+
+# --- ОПТИМИЗИРОВАННАЯ СЕССИЯ SHORT.IO ---
+session = requests.Session()
+session.headers.update({
     "accept": "application/json",
     "content-type": "application/json",
     "authorization": API_KEY,
-}
+})
 
 def shorten_api(url, custom_slug=None):
     payload = {"domain": DOMAIN, "originalURL": url}
     if custom_slug:
         payload["path"] = custom_slug
     try:
-        r = requests.post("https://api.short.io/links", json=payload, headers=headers, timeout=10)
+        r = session.post("https://api.short.io/links", json=payload, timeout=6)
         if r.status_code in [200, 201]:
             return r.json().get("shortURL")
         return f"Error: {r.json().get('message', 'Failed')}"
-    except Exception as e:
+    except Exception:
         return "Network Error"
 
 def generate_qr(url_text):
@@ -163,7 +175,6 @@ def generate_qr(url_text):
 def cmd_start(message):
     u = get_user(message.from_user.id)
     if u.get("new"):
-        # Если новый пользователь — сначала выбор языка
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("🇷🇺 Русский", callback_data="setlang_ru"),
                types.InlineKeyboardButton("🇬🇧 English", callback_data="setlang_en"))
@@ -200,7 +211,7 @@ def cmd_buy(message):
     l = u["lang"]
     t = TEXTS[l]
 
-    if u["is_vip"]:
+    if u["is_vip"] and message.from_user.id != ADMIN_ID:
         bot.reply_to(message, t['vip_status'])
         return
 
@@ -249,7 +260,6 @@ def process_payment(message):
     db.commit()
     bot.send_message(message.chat.id, "🎉 **VIP Activated!**", parse_mode="Markdown")
 
-# Выдача VIP администратором вручную (для СБП / Crypto)
 @bot.message_handler(commands=['givevip'])
 def cmd_give_vip(message):
     if message.from_user.id != ADMIN_ID:
@@ -296,12 +306,12 @@ def cmd_stats(message):
         return
     path = parts[1].strip().split("/")[-1]
     try:
-        info_resp = requests.get(f"https://api.short.io/links/expand?domain={DOMAIN}&path={path}", headers=headers).json()
+        info_resp = session.get(f"https://api.short.io/links/expand?domain={DOMAIN}&path={path}").json()
         link_id = info_resp.get("idString")
         if not link_id:
             bot.reply_to(message, "❌ Link not found.")
             return
-        stat_resp = requests.get(f"https://api.short.io/statistics/link/{link_id}?period=total", headers=headers).json()
+        stat_resp = session.get(f"https://api.short.io/statistics/link/{link_id}?period=total").json()
         clicks = stat_resp.get("humanClicks", 0)
         bot.reply_to(message, f"📊 Clicks / Переходов: **{clicks}**", parse_mode="Markdown")
     except Exception as e:
@@ -317,7 +327,7 @@ def cmd_history(message):
     text = "📜 **Recent Links / История:**\n\n" + "\n\n".join([f"• {orig[:30]}... → {short}" for orig, short in rows])
     bot.reply_to(message, text, parse_mode="Markdown")
 
-# --- БЫСТРАЯ ОБРАБОТКА ПОТОКАМИ ---
+# --- СВЕРХБЫСТРАЯ МНОГОПОТОЧНАЯ ОБРАБОТКА (20 ПОТОКОВ) ---
 def process_bulk_fast(user_id, raw_urls, message_id, chat_id):
     total = len(raw_urls)
     results = [None] * total
@@ -331,13 +341,16 @@ def process_bulk_fast(user_id, raw_urls, message_id, chat_id):
             save_link_history(user_id, url, res)
         return idx, res
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    # 20 рабочих потоков на готовой HTTP-сессии
+    with ThreadPoolExecutor(max_workers=20) as executor:
         futures = [executor.submit(worker, (i, u)) for i, u in enumerate(raw_urls)]
         for f in futures:
             idx, res = f.result()
             results[idx] = res
             completed += 1
-            if time.time() - last_edit > 1.5 or completed == total:
+            
+            # Обновление прогресса каждые 2 секунды (не блокирует скорость отправки)
+            if time.time() - last_edit > 2.0 or completed == total:
                 percent = int((completed / total) * 100)
                 filled = int((completed / total) * 10)
                 bar = "█" * filled + "░" * (10 - filled)
@@ -422,5 +435,5 @@ def handle_msg(message):
 
 if __name__ == "__main__":
     keep_alive()
-    print("✅ Бот обновлен и запущен!")
+    print("✅ Бот оптимизирован и запущен!")
     bot.infinity_polling()
