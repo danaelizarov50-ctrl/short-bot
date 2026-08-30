@@ -1,13 +1,14 @@
 import telebot
 from telebot import types
 import requests
+from requests.adapters import HTTPAdapter
 import re
 import time
 import io
 import os
 import sqlite3
 import qrcode
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Thread
 from flask import Flask
 
@@ -32,9 +33,8 @@ BOT_TOKEN = "8986502114:AAFVjiRDeJYSJNRc2Hd7rBiCtjgG1-_sNDs"
 API_KEY = "sk_aNOsM1BKzhp7H1q4"
 DOMAIN = "gemini18monthgift.s.gy"
 FREE_DAILY_LIMIT = 10
-ADMIN_ID = 6598036118  # Ваш Telegram ID для авто-VIP и ручных подтверждений
+ADMIN_ID = 6598036118
 
-# Реквизиты для оплаты
 CRYPTOBOT_PAY_URL = "https://t.me/CryptoBot?start=pay"
 XROCKET_PAY_URL = "https://t.me/xrocket?start=pay"
 SBP_DETAILS = "+7 (999) 000-00-00 (Тинькофф / Сбер)"
@@ -42,7 +42,7 @@ CRYPTO_WALLETS = "• USDT (TRC-20): `TXXXXXXXXXXXXXXXXXXXXXXXXXXXXX`\n• TON: 
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# --- БАЗА ДАННЫХ ---
+# --- НАСТРОЙКА БАЗЫ ДАННЫХ ---
 db = sqlite3.connect("database.db", check_same_thread=False)
 cursor = db.cursor()
 
@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS links_history (
 """)
 db.commit()
 
-# --- ТЕКСТЫ И ЛОКАЛИЗАЦИЯ (RU / EN) ---
+# --- ТЕКСТЫ И ЛОКАЛИЗАЦИЯ ---
 TEXTS = {
     'ru': {
         'start': "👋 **Добро пожаловать в Shortener Bot!**\n\n📊 Статус: {status}\n\n**Команды:**\n• Отправьте ссылку, список или `.txt` файл\n• `/custom <ссылка> <хвост>` — создать именную ссылку\n• `/stats <короткая_ссылка>` — статистика кликов\n• `/history` — история ваших ссылок\n• `/language` — сменить язык\n• `/buy` — купить вечный безлимит за ~0.60$",
@@ -81,10 +81,10 @@ TEXTS = {
         'pay_xrocket': "🚀 xRocket",
         'pay_sbp': "🇷🇺 СБП / Банковская карта",
         'pay_direct_crypto': "💎 Прямой перевод Crypto (USDT/TON)",
-        'sbp_info': f"💳 **Оплата через СБП / Карту (60 руб)**\n\nРеквизиты для перевода:\n`{SBP_DETAILS}`\n\nПосле оплаты отправьте скриншот/чек администратору для выдачи доступа.",
+        'sbp_info': f"💳 **Оплата через СБП / Карту (60 руб)**\n\nРеквизиты для перевода:\n`{SBP_DETAILS}`\n\nПосле оплаты отправьте чек администратору для активации.",
         'direct_crypto_info': f"💎 **Оплата криптовалютой ($0.60)**\n\n{CRYPTO_WALLETS}\n\nПосле отправки напишите админу с TXID транзакции.",
         'ready_one': "✅ Готово:",
-        'bulk_start': "🚀 Быстрая обработка...",
+        'bulk_start': "🚀 Начинаю обработку...",
         'bulk_done': "✅ Готово! Обработано {count} ссылок."
     },
     'en': {
@@ -102,7 +102,7 @@ TEXTS = {
         'sbp_info': f"💳 **Payment via Card / SBP (60 RUB)**\n\nDetails:\n`{SBP_DETAILS}`\n\nAfter payment, send receipt to admin for activation.",
         'direct_crypto_info': f"💎 **Direct Crypto ($0.60)**\n\n{CRYPTO_WALLETS}\n\nAfter transaction, contact admin with TXID.",
         'ready_one': "✅ Ready:",
-        'bulk_start': "🚀 Fast processing...",
+        'bulk_start': "🚀 Starting processing...",
         'bulk_done': "✅ Done! Processed {count} links."
     }
 }
@@ -132,15 +132,14 @@ def set_user_lang(user_id, lang):
     db.commit()
 
 def add_usage(user_id, count):
-    cursor.execute("UPDATE users SET daily_used = daily_used + ? WHERE user_id = ?", (count, user_id))
-    db.commit()
+    if user_id != ADMIN_ID:
+        cursor.execute("UPDATE users SET daily_used = daily_used + ? WHERE user_id = ?", (count, user_id))
+        db.commit()
 
-def save_link_history(user_id, original, short):
-    cursor.execute("INSERT INTO links_history (user_id, original_url, short_url) VALUES (?, ?, ?)", (user_id, original, short))
-    db.commit()
-
-# --- ОПТИМИЗИРОВАННАЯ СЕССИЯ SHORT.IO ---
+# --- СЕССИЯ SHORT.IO С ПУЛОМ СОЕДИНЕНИЙ ---
 session = requests.Session()
+adapter = HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=2)
+session.mount('https://', adapter)
 session.headers.update({
     "accept": "application/json",
     "content-type": "application/json",
@@ -152,12 +151,18 @@ def shorten_api(url, custom_slug=None):
     if custom_slug:
         payload["path"] = custom_slug
     try:
-        r = session.post("https://api.short.io/links", json=payload, timeout=6)
+        r = session.post("https://api.short.io/links", json=payload, timeout=8)
         if r.status_code in [200, 201]:
-            return r.json().get("shortURL")
-        return f"Error: {r.json().get('message', 'Failed')}"
+            return r.json().get("shortURL", url)
+        # Если превышен рейт-лимит — делаем паузу и пробуем ещё раз
+        if r.status_code == 429:
+            time.sleep(0.5)
+            r = session.post("https://api.short.io/links", json=payload, timeout=8)
+            if r.status_code in [200, 201]:
+                return r.json().get("shortURL", url)
+        return f"Error_{r.status_code}"
     except Exception:
-        return "Network Error"
+        return "Network_Error"
 
 def generate_qr(url_text):
     qr = qrcode.QRCode(box_size=10, border=2)
@@ -170,7 +175,7 @@ def generate_qr(url_text):
     bio.seek(0)
     return bio
 
-# --- ОБРАБОТЧИКИ КОМАНД ---
+# --- КОМАНДЫ ---
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     u = get_user(message.from_user.id)
@@ -204,7 +209,6 @@ def show_main_menu(chat_id, user_dict):
     status = t['vip_status'] if user_dict['is_vip'] else t['free_status'].format(used=user_dict['daily_used'], limit=FREE_DAILY_LIMIT)
     bot.send_message(chat_id, t['start'].format(status=status), parse_mode="Markdown")
 
-# --- МЕНЮ ОПЛАТЫ (/buy) ---
 @bot.message_handler(commands=['buy'])
 def cmd_buy(message):
     u = get_user(message.from_user.id)
@@ -273,7 +277,6 @@ def cmd_give_vip(message):
     except:
         bot.reply_to(message, "Используйте: `/givevip USER_ID`", parse_mode="Markdown")
 
-# --- КАСТОМНЫЕ ССЫЛКИ, СТАТИСТИКА, ИСТОРИЯ ---
 @bot.message_handler(commands=['custom'])
 def cmd_custom(message):
     u = get_user(message.from_user.id)
@@ -292,7 +295,6 @@ def cmd_custom(message):
     res = shorten_api(parts[1], custom_slug=parts[2])
     if res.startswith("http"):
         add_usage(message.from_user.id, 1)
-        save_link_history(message.from_user.id, parts[1], res)
         qr = generate_qr(res)
         bot.send_photo(message.chat.id, qr, caption=f"{t['ready_one']} {res}")
     else:
@@ -327,8 +329,8 @@ def cmd_history(message):
     text = "📜 **Recent Links / История:**\n\n" + "\n\n".join([f"• {orig[:30]}... → {short}" for orig, short in rows])
     bot.reply_to(message, text, parse_mode="Markdown")
 
-# --- СВЕРХБЫСТРАЯ МНОГОПОТОЧНАЯ ОБРАБОТКА (20 ПОТОКОВ) ---
-def process_bulk_fast(user_id, raw_urls, message_id, chat_id):
+# --- СТАБИЛЬНАЯ ПАКЕТНАЯ ОБРАБОТКА (БЕЗ ЗАВИСАНИЙ) ---
+def process_bulk_safe(raw_urls, message_id, chat_id):
     total = len(raw_urls)
     results = [None] * total
     completed = 0
@@ -337,20 +339,23 @@ def process_bulk_fast(user_id, raw_urls, message_id, chat_id):
     def worker(item):
         idx, url = item
         res = shorten_api(url)
-        if res.startswith("http"):
-            save_link_history(user_id, url, res)
         return idx, res
 
-    # 20 рабочих потоков на готовой HTTP-сессии
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = [executor.submit(worker, (i, u)) for i, u in enumerate(raw_urls)]
-        for f in futures:
-            idx, res = f.result()
-            results[idx] = res
+    # 6 параллельных потоков — идеальный баланс между скоростью и лимитами Short.io
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = {executor.submit(worker, (i, u)): i for i, u in enumerate(raw_urls)}
+        for future in as_completed(futures):
+            try:
+                idx, res = future.result()
+                results[idx] = res
+            except Exception:
+                idx = futures[future]
+                results[idx] = raw_urls[idx]
+            
             completed += 1
             
-            # Обновление прогресса каждые 2 секунды (не блокирует скорость отправки)
-            if time.time() - last_edit > 2.0 or completed == total:
+            # Обновление прогресс-бара каждые 3 секунды
+            if time.time() - last_edit > 3.0 or completed == total:
                 percent = int((completed / total) * 100)
                 filled = int((completed / total) * 10)
                 bar = "█" * filled + "░" * (10 - filled)
@@ -359,9 +364,10 @@ def process_bulk_fast(user_id, raw_urls, message_id, chat_id):
                 except:
                     pass
                 last_edit = time.time()
+                
     return results
 
-# --- ОБРАБОТКА ФАЙЛОВ И ТЕКСТА ---
+# --- ОБРАБОТКА ФАЙЛОВ И СООБЩЕНИЙ ---
 @bot.message_handler(content_types=['document'])
 def handle_doc(message):
     u = get_user(message.from_user.id)
@@ -381,13 +387,17 @@ def handle_doc(message):
             return
 
         status_msg = bot.reply_to(message, t['bulk_start'])
-        res = process_bulk_fast(message.from_user.id, urls, status_msg.message_id, message.chat.id)
+        res = process_bulk_safe(urls, status_msg.message_id, message.chat.id)
         add_usage(message.from_user.id, len(urls))
 
         out = io.BytesIO("\n".join(res).encode('utf-8'))
         out.name = "shortened_urls.txt"
         bot.send_document(message.chat.id, out, caption=t['bulk_done'].format(count=len(urls)))
-        bot.delete_message(message.chat.id, status_msg.message_id)
+        
+        try:
+            bot.delete_message(message.chat.id, status_msg.message_id)
+        except:
+            pass
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {e}")
 
@@ -409,7 +419,6 @@ def handle_msg(message):
         res = shorten_api(urls[0])
         if res.startswith("http"):
             add_usage(message.from_user.id, 1)
-            save_link_history(message.from_user.id, urls[0], res)
             qr = generate_qr(res)
             bot.send_photo(message.chat.id, qr, caption=f"{t['ready_one']} {res}")
         else:
@@ -417,7 +426,7 @@ def handle_msg(message):
         return
 
     status_msg = bot.reply_to(message, t['bulk_start'])
-    res = process_bulk_fast(message.from_user.id, urls, status_msg.message_id, message.chat.id)
+    res = process_bulk_safe(urls, status_msg.message_id, message.chat.id)
     add_usage(message.from_user.id, len(urls))
 
     result_text = "\n".join(res)
@@ -435,5 +444,5 @@ def handle_msg(message):
 
 if __name__ == "__main__":
     keep_alive()
-    print("✅ Бот оптимизирован и запущен!")
+    print("✅ Бот готов и стабильно работает!")
     bot.infinity_polling()
