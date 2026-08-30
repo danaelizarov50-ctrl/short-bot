@@ -32,7 +32,7 @@ BOT_TOKEN = "8986502114:AAFVjiRDeJYSJNRc2Hd7rBiCtjgG1-_sNDs"
 API_KEY = "sk_aNOsM1BKzhp7H1q4"
 DOMAIN = "gemini18monthgift.s.gy"
 FREE_DAILY_LIMIT = 10
-ADMIN_ID = 123456789  # Вставьте ваш ID Telegram для подтверждений/ручных оплат
+ADMIN_ID = 6598036118  # Вставьте ваш ID Telegram для подтверждений/ручных оплат
 
 # Реквизиты для оплаты (замените на свои)
 CRYPTOBOT_PAY_URL = "https://t.me/CryptoBot?start=pay"  # Или конкретный чек/инвойс из @CryptoBot
@@ -109,6 +109,10 @@ TEXTS = {
 
 # --- ФУНКЦИИ ПОЛЬЗОВАТЕЛЕЙ ---
 def get_user(user_id):
+    # Автоматический вечный VIP для вас
+    if user_id == ADMIN_ID:
+        return {"lang": "ru", "is_vip": 1, "daily_used": 0, "new": False}
+
     today = time.strftime("%Y-%m-%d")
     cursor.execute("SELECT lang, is_vip, daily_used, last_reset_date FROM users WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
@@ -116,25 +120,13 @@ def get_user(user_id):
         cursor.execute("INSERT INTO users (user_id, lang, is_vip, daily_used, last_reset_date) VALUES (?, 'ru', 0, 0, ?)", (user_id, today))
         db.commit()
         return {"lang": "ru", "is_vip": 0, "daily_used": 0, "new": True}
-    
+
     lang, is_vip, daily_used, last_date = row
     if last_date != today:
         cursor.execute("UPDATE users SET daily_used = 0, last_reset_date = ? WHERE user_id = ?", (today, user_id))
         db.commit()
         daily_used = 0
     return {"lang": lang, "is_vip": is_vip, "daily_used": daily_used, "new": False}
-
-def set_user_lang(user_id, lang):
-    cursor.execute("UPDATE users SET lang = ? WHERE user_id = ?", (lang, user_id))
-    db.commit()
-
-def add_usage(user_id, count):
-    cursor.execute("UPDATE users SET daily_used = daily_used + ? WHERE user_id = ?", (count, user_id))
-    db.commit()
-
-def save_link_history(user_id, original, short):
-    cursor.execute("INSERT INTO links_history (user_id, original_url, short_url) VALUES (?, ?, ?)", (user_id, original, short))
-    db.commit()
 
 # --- SHORT.IO API ---
 headers = {
