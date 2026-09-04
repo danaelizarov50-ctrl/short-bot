@@ -387,3 +387,40 @@ if __name__ == "__main__":
     keep_alive()
     print("✅ Бот запущен с активными платежными шлюзами!")
     bot.infinity_polling()
+
+
+@bot.message_handler(commands=['givevip'])
+def cmd_give_vip(message):
+    # Проверяем, что команду пишет именно админ (ты)
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    parts = message.text.split()
+    if len(parts) < 2:
+        bot.reply_to(message, "Используй формат:\n`/givevip 123456789` (где число — Telegram ID пользователя)", parse_mode="Markdown")
+        return
+
+    try:
+        target_id = int(parts[1].strip())
+        
+        # Записываем VIP в базу данных
+        with get_db() as conn:
+            c = conn.cursor()
+            # Обновляем или добавляем пользователя с VIP-статусом
+            c.execute("""
+                INSERT INTO users (user_id, is_vip, daily_used, last_reset_date)
+                VALUES (?, 1, 0, date('now'))
+                ON CONFLICT(user_id) DO UPDATE SET is_vip = 1
+            """, (target_id,))
+            conn.commit()
+
+        bot.reply_to(message, f"✅ VIP успешно выдан пользователю `{target_id}`!", parse_mode="Markdown")
+
+        # Оповещаем пользователя, если он уже запускал бота
+        try:
+            bot.send_message(target_id, "👑 **Вам выдан постоянный VIP-доступ!**\nТеперь у вас безлимитное сокращение ссылок.", parse_mode="Markdown")
+        except:
+            pass
+
+    except ValueError:
+        bot.reply_to(message, "❌ Неверный ID. ID должен состоять только из цифр.")
